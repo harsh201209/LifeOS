@@ -55,7 +55,21 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-off
 </aside>
 <main>
  <div class="top"><div><div class="eyebrow" id="crumb">OVERVIEW</div><h1 id="pageTitle">Dashboard</h1></div><div class="row"><span class="pill">LOCAL WORKSPACE</span><button class="btn ghost" onclick="toggleTheme()">◐ Theme</button></div></div>
- <div id="content"></div>
+ <section class="card" id="cloudPanel" style="margin-bottom:16px">
+  <div class="row between"><div><strong>☁ LIFEOS Cloud Sync</strong><div class="small muted" id="cloudStatus">Not connected · Your data is currently stored in this browser.</div></div><button class="btn" onclick="toggleCloudSettings()">Setup / Account</button></div>
+  <div id="cloudSettings" style="display:none;margin-top:14px">
+    <p class="small muted">Connect your own Supabase project. The Supabase URL and public anon/publishable key are not passwords. Never paste a service-role key here. Your LIFEOS data is encrypted in this browser using your account password before it is uploaded.</p>
+    <label>Supabase Project URL<input id="sbUrl" placeholder="https://your-project.supabase.co" autocomplete="off"></label>
+    <label>Supabase publishable / anon key<input id="sbKey" placeholder="sb_publishable_... or anon public key" autocomplete="off"></label>
+    <div class="actions"><button class="btn" onclick="saveCloudConfig()">Save connection settings</button><button class="btn" onclick="testCloudConfig()">Test connection</button></div>
+    <hr>
+    <label>Email address<input id="cloudEmail" type="email" placeholder="you@example.com" autocomplete="username"></label>
+    <label>Password<input id="cloudPassword" type="password" placeholder="Use a strong, unique password" autocomplete="current-password"></label>
+    <div class="actions"><button class="btn primary" onclick="cloudSignUp()">Create account</button><button class="btn" onclick="cloudSignIn()">Sign in & sync</button><button class="btn danger" onclick="cloudSignOut()">Sign out</button></div>
+    <div class="small muted" id="cloudHelp" style="margin-top:8px">You must create the Supabase table and enable the row-level security policies described in the setup guide before syncing.</div>
+  </div>
+</section>
+<div id="content"></div>
  <footer>LIFEOS prototype · Your information stays in this browser unless you export it. Back up regularly.</footer>
 </main></div><div id="toast"></div>
 <script>
@@ -63,7 +77,10 @@ const KEY='lifeos_v1';
 const defaults={tasks:[],achievements:[],skills:[],certs:[],milestones:[],blogs:[],notes:[],goals:[],study:[],cyber:[],book:[],expenses:[],wishlist:[],transactions:[],monthlyBalances:{},financePin:null,diaryMeta:null,diary:[],profileSuggestions:[],profileDetails:{name:'',headline:'',about:''}};
 let selectedFinanceMonth=new Date().toISOString().slice(0,7);
 let db=load();function load(){try{return {...defaults,...JSON.parse(localStorage.getItem(KEY)||'{}')}}catch(e){return {...defaults}}}
-function save(){localStorage.setItem(KEY,JSON.stringify(db));}
+function save(){
+ localStorage.setItem(KEY,JSON.stringify(db));
+ if(window.lifeosCloudSession && window.lifeosCloudKey) scheduleCloudSync();
+}
 function esc(s=''){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function toast(s){let t=document.getElementById('toast');t.textContent=s;t.style.display='block';setTimeout(()=>t.style.display='none',2200)}
 const titles={dashboard:'Dashboard',day:'My Day',study:'StudyOS',cyber:'CyberLab',writing:"Writer's Studio",shopping:'BuyHatke Hub',blog:'Blog Studio',profile:'My Profile',apps:'Connected Universe',space:'Personal Space',finance:'Finance',diary:'Private Diary',ai:'LIFEOS AI'};
@@ -335,5 +352,126 @@ function toggleTheme(){
 }
 document.body.dataset.theme=localStorage.getItem('lifeos_theme')||'dark';
 
+
+// LIFEOS secure cloud sync. Only the Supabase public anon/publishable key belongs here.
+// Data is encrypted client-side with a key derived from the account password.
+let lifeosCloudSession = null;
+let lifeosCloudKey = null;
+let lifeosCloudTimer = null;
+let lifeosCloudBusy = false;
+const CLOUD_CFG_KEY = 'lifeos_supabase_config_v1';
+function cloudConfig(){try{return JSON.parse(localStorage.getItem(CLOUD_CFG_KEY)||'{}')}catch(e){return {}}}
+function toggleCloudSettings(){const el=document.getElementById('cloudSettings');el.style.display=el.style.display==='none'?'block':'none';const c=cloudConfig();document.getElementById('sbUrl').value=c.url||'';document.getElementById('sbKey').value=c.key||'';updateCloudStatus();}
+function saveCloudConfig(){
+ const url=document.getElementById('sbUrl').value.trim().replace(/\/+$/,'');
+ const key=document.getElementById('sbKey').value.trim();
+ if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)||!key){toast('Enter a valid Supabase project URL and public anon/publishable key');return;}
+ localStorage.setItem(CLOUD_CFG_KEY,JSON.stringify({url,key}));toast('Supabase settings saved on this device');updateCloudStatus();
+}
+function updateCloudStatus(){
+ const el=document.getElementById('cloudStatus');if(!el)return;
+ if(lifeosCloudSession)el.textContent='Signed in as '+(lifeosCloudSession.user?.email||'your account')+' · encrypted cloud sync enabled';
+ else el.textContent='Not signed in · data stays in this browser';
+}
+async function sbRequest(path,method='GET',body=null,auth=true,prefer=null){
+ const c=cloudConfig();if(!c.url||!c.key)throw Error('Save your Supabase project URL and public key first.');
+ const headers={'apikey':c.key,'Content-Type':'application/json'};
+ if(prefer)headers.Prefer=prefer;
+ if(auth&&lifeosCloudSession?.access_token)headers.Authorization='Bearer '+lifeosCloudSession.access_token;
+ else headers.Authorization='Bearer '+c.key;
+ const res=await fetch(c.url+path,{method,headers,body:body===null?undefined:JSON.stringify(body)});
+ const txt=await res.text();let data=null;try{data=txt?JSON.parse(txt):null}catch(e){data=txt}
+ if(!res.ok)throw Error(data?.msg||data?.message||data?.error_description||data?.hint||('Supabase error '+res.status+': '+txt));
+ return data;
+}
+async function testCloudConfig(){
+ try{await sbRequest('/auth/v1/settings','GET',null,false);toast('Supabase connection works');}
+ catch(e){toast('Connection test failed: '+e.message);}
+}
+function b64bytes(bytes){let s='';bytes.forEach(b=>s+=String.fromCharCode(b));return btoa(s);}
+function unb64bytes(s){return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
+async function cloudDataKey(password,salt){
+ const material=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']);
+ return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function cloudEncryptDatabase(key,obj){
+ const iv=crypto.getRandomValues(new Uint8Array(12));
+ const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(JSON.stringify(obj)));
+ return {iv:b64bytes(iv),ciphertext:b64bytes(new Uint8Array(encrypted))};
+}
+async function cloudDecryptDatabase(key,row){
+ const raw=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64bytes(row.iv)},key,unb64bytes(row.ciphertext));
+ return JSON.parse(new TextDecoder().decode(raw));
+}
+async function cloudAuth(mode){
+ const email=document.getElementById('cloudEmail').value.trim();
+ const password=document.getElementById('cloudPassword').value;
+ if(!email||password.length<10){toast('Enter your email and a password of at least 10 characters');return;}
+ const endpoint=mode==='signup'?'/auth/v1/signup':'/auth/v1/token?grant_type=password';
+ const c=cloudConfig();if(!c.url||!c.key){toast('Save Supabase settings first');return;}
+ const result=await sbRequest(endpoint,'POST',{email,password},false);
+ if(mode==='signup'&&!result.access_token){
+   document.getElementById('cloudHelp').textContent='Account created. Check your email to confirm it, then return and sign in.';
+   toast('Check your email to confirm your account');return;
+ }
+ const session=result;
+ if(!session.access_token){toast('No active session returned. Confirm your email, then sign in.');return;}
+ lifeosCloudSession={access_token:session.access_token,refresh_token:session.refresh_token,user:session.user};
+ localStorage.setItem('lifeos_cloud_session_v1',JSON.stringify(lifeosCloudSession));
+ if(mode==='signup'){
+   const salt=crypto.getRandomValues(new Uint8Array(16));
+   lifeosCloudKey=await cloudDataKey(password,salt);
+   await cloudUpload(salt);
+ }else{
+   await cloudLoadOrOffer(password);
+ }
+ document.getElementById('cloudPassword').value='';
+ updateCloudStatus();toast('LIFEOS cloud account connected');
+}
+async function cloudSignUp(){try{await cloudAuth('signup')}catch(e){toast('Sign-up failed: '+e.message)}}
+async function cloudSignIn(){try{await cloudAuth('signin')}catch(e){toast('Sign-in failed: '+e.message)}}
+async function cloudFetchRow(){
+ const rows=await sbRequest('/rest/v1/lifeos_vault?select=user_id,salt,iv,ciphertext,updated_at&limit=1');
+ return rows?.[0]||null;
+}
+function localDbHasData(){
+ return Object.keys(db).some(k=>Array.isArray(db[k])&&db[k].length) ||
+ Object.keys(db.monthlyBalances||{}).length>0 || !!db.diaryMeta ||
+ !!(db.profileDetails?.name||db.profileDetails?.about);
+}
+async function cloudLoadOrOffer(password){
+ const row=await cloudFetchRow();
+ if(!row){const salt=crypto.getRandomValues(new Uint8Array(16));lifeosCloudKey=await cloudDataKey(password,salt);await cloudUpload(salt);return;}
+ const salt=unb64bytes(row.salt);
+ const key=await cloudDataKey(password,salt);
+ let remote;
+ try{remote=await cloudDecryptDatabase(key,row)}catch(e){throw Error('Could not decrypt cloud data. Check that you used the original LIFEOS account password.')}
+ if(localDbHasData()&&!confirm('Cloud data was found. Choose OK to load cloud data onto this device. Your current local data will first be downloaded as a backup. Choose Cancel to keep local data and upload it to the cloud instead.')){
+   const backup=new Blob([JSON.stringify(db,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(backup);a.download='LIFEOS-local-before-cloud.json';a.click();URL.revokeObjectURL(a.href);
+   lifeosCloudKey=key;await cloudUpload(salt);return;
+ }
+ localStorage.setItem(KEY,JSON.stringify({...defaults,...remote}));
+ db=load();lifeosCloudKey=key;go('dashboard');
+}
+async function cloudUpload(existingSalt=null){
+ if(!lifeosCloudSession||!lifeosCloudKey||lifeosCloudBusy)return;
+ lifeosCloudBusy=true;
+ try{
+  let salt=existingSalt;
+  if(!salt){const row=await cloudFetchRow();salt=row?unb64bytes(row.salt):crypto.getRandomValues(new Uint8Array(16));}
+  const encrypted=await cloudEncryptDatabase(lifeosCloudKey,db);
+  const row={user_id:lifeosCloudSession.user.id,salt:b64bytes(salt),iv:encrypted.iv,ciphertext:encrypted.ciphertext,updated_at:new Date().toISOString()};
+  await sbRequest('/rest/v1/lifeos_vault?on_conflict=user_id','POST',row,true,'resolution=merge-duplicates,return=minimal');
+  document.getElementById('cloudStatus').textContent='Signed in · last encrypted sync '+new Date().toLocaleTimeString();
+ }catch(e){toast('Cloud sync failed: '+e.message)}
+ finally{lifeosCloudBusy=false}
+}
+function scheduleCloudSync(){clearTimeout(lifeosCloudTimer);lifeosCloudTimer=setTimeout(()=>cloudUpload().catch(()=>{}),1200);}
+async function cloudSignOut(){
+ lifeosCloudSession=null;lifeosCloudKey=null;localStorage.removeItem('lifeos_cloud_session_v1');updateCloudStatus();toast('Signed out. Local copy remains on this device.');
+}
+
+// Restore an existing session only as a signed-in marker. Password is required again to unlock encrypted cloud data.
+try{const saved=JSON.parse(localStorage.getItem('lifeos_cloud_session_v1')||'null');if(saved?.refresh_token){lifeosCloudSession=saved;updateCloudStatus();document.getElementById('cloudStatus').textContent='Session saved · enter your account password and sign in again to unlock encrypted cloud sync.';}}catch(e){}
 render('dashboard');
 </script></body></html>
